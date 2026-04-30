@@ -113,6 +113,13 @@ show_status() {
         [[ -n "$socks_port" ]] && info "SOCKS 端口：127.0.0.1:${socks_port}"
     fi
 
+    # bashrc 代理状态
+    if grep -q "mihomo proxy begin" "$HOME/.bashrc" 2>/dev/null; then
+        success "系统代理：${GREEN}已写入 ~/.bashrc${RESET}"
+    else
+        warn "系统代理：${DIM}未写入 ~/.bashrc${RESET}"
+    fi
+
     echo ""
     echo -e "${DIM}──────────────────────────────────────────────${RESET}"
     echo ""
@@ -143,6 +150,39 @@ EOF
     systemctl daemon-reload
     systemctl enable "$SERVICE" &>/dev/null
     success "systemd 服务已创建 → $SERVICE_FILE"
+}
+
+# ── bashrc 代理标记 ───────────────────────────────────────────────────────────
+BASHRC_MARK_BEGIN="# >>> mihomo proxy begin <<<"
+BASHRC_MARK_END="# >>> mihomo proxy end <<<"
+BASHRC="$HOME/.bashrc"
+
+get_proxy_port() {
+    local mixed_port http_port
+    mixed_port=$(grep -E '^mixed-port:' "$CONFIG_FILE" 2>/dev/null | awk '{print $2}' | head -1 || true)
+    http_port=$(grep -E '^port:' "$CONFIG_FILE" 2>/dev/null | awk '{print $2}' | head -1 || true)
+    echo "${mixed_port:-$http_port}"
+}
+
+write_proxy_to_bashrc() {
+    local port="$1"
+    remove_proxy_from_bashrc  # 防止重复写入
+    cat >> "$BASHRC" <<EOF
+
+${BASHRC_MARK_BEGIN}
+export http_proxy=http://127.0.0.1:${port}
+export https_proxy=http://127.0.0.1:${port}
+export all_proxy=socks5://127.0.0.1:${port}
+${BASHRC_MARK_END}
+EOF
+    success "代理环境变量已写入 ~/.bashrc"
+}
+
+remove_proxy_from_bashrc() {
+    if grep -q "$BASHRC_MARK_BEGIN" "$BASHRC" 2>/dev/null; then
+        sed -i "/${BASHRC_MARK_BEGIN}/,/${BASHRC_MARK_END}/d" "$BASHRC"
+        success "已从 ~/.bashrc 移除代理环境变量"
+    fi
 }
 
 # ── 开启 ──────────────────────────────────────────────────────────────────────
@@ -192,6 +232,15 @@ start_mihomo() {
             [[ -n "$addr" ]] && info "代理地址：${addr}  ${DIM}(http+socks5)${RESET}"
         fi
         info "节点健康检测在后台进行，属正常现象"
+        # 写入 bashrc 并提示 source
+        local port
+        port=$(get_proxy_port)
+        if [[ -n "$port" ]]; then
+            write_proxy_to_bashrc "$port"
+            echo ""
+            warn "新终端窗口自动生效；当前窗口请执行："
+            echo -e "  ${BOLD}source ~/.bashrc${RESET}"
+        fi
     else
         error "启动失败，最近日志："
         echo ""
@@ -210,6 +259,10 @@ stop_mihomo() {
 
     systemctl stop "$SERVICE"
     success "mihomo 已停止"
+    remove_proxy_from_bashrc
+    echo ""
+    warn "当前终端窗口请执行以立即取消代理："
+    echo -e "  ${BOLD}source ~/.bashrc${RESET}"
 }
 
 # ── 更新订阅 ──────────────────────────────────────────────────────────────────
@@ -283,34 +336,6 @@ show_logs() {
     fi
 }
 
-# ── 设置系统代理环境变量 ───────────────────────────────────────────────────────
-set_proxy_env() {
-    if [[ ! -f "$CONFIG_FILE" ]]; then
-        warn "配置文件不存在，无法读取端口"
-        return
-    fi
-
-    local mixed_port http_port
-    mixed_port=$(grep -E '^mixed-port:' "$CONFIG_FILE" 2>/dev/null | awk '{print $2}' | head -1 || true)
-    http_port=$(grep -E '^port:' "$CONFIG_FILE" 2>/dev/null | awk '{print $2}' | head -1 || true)
-
-    local port="${mixed_port:-$http_port}"
-    [[ -z "$port" ]] && die "无法从配置文件读取端口号"
-
-    echo ""
-    success "复制以下命令到终端执行（让当前 shell 走代理）："
-    echo ""
-    echo -e "  ${BOLD}export http_proxy=http://127.0.0.1:${port}${RESET}"
-    echo -e "  ${BOLD}export https_proxy=http://127.0.0.1:${port}${RESET}"
-    echo -e "  ${BOLD}export all_proxy=socks5://127.0.0.1:${port}${RESET}"
-    echo ""
-    info "取消代理："
-    echo -e "  ${BOLD}unset http_proxy https_proxy all_proxy${RESET}"
-    echo ""
-    info "永久写入 ~/.bashrc："
-    echo -e "  ${DIM}echo 'export http_proxy=http://127.0.0.1:${port}' >> ~/.bashrc${RESET}"
-}
-
 # ── 主菜单 ────────────────────────────────────────────────────────────────────
 main() {
     while true; do
@@ -318,14 +343,13 @@ main() {
 
         echo -e "  ${BOLD}请选择操作：${RESET}"
         echo ""
-        echo -e "  ${GREEN}1${RESET}) 开启 mihomo"
-        echo -e "  ${RED}2${RESET}) 关闭 mihomo"
+        echo -e "  ${GREEN}1${RESET}) 开启 mihomo  ${DIM}(启动服务 + 写入代理到 ~/.bashrc)${RESET}"
+        echo -e "  ${RED}2${RESET}) 关闭 mihomo  ${DIM}(停止服务 + 清除 ~/.bashrc 代理)${RESET}"
         echo -e "  ${CYAN}3${RESET}) 更新订阅链接"
         echo -e "  ${YELLOW}4${RESET}) 查看运行日志"
-        echo -e "  ${YELLOW}5${RESET}) 显示代理环境变量"
         echo -e "  ${DIM}0) 退出${RESET}"
         echo ""
-        read -rp "  输入选项 [0-5]：" choice
+        read -rp "  输入选项 [0-4]：" choice
         echo ""
 
         case "$choice" in
@@ -333,7 +357,6 @@ main() {
             2) stop_mihomo ;;
             3) update_subscription ;;
             4) show_logs ;;
-            5) set_proxy_env ;;
             0) info "再见！"; echo ""; exit 0 ;;
             *) warn "无效选项" ;;
         esac
