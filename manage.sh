@@ -163,16 +163,37 @@ start_mihomo() {
     fi
 
     systemctl start "$SERVICE"
-    sleep 1
 
-    if [[ $(service_status) == "active" ]]; then
+    # 等待最多 10 秒，检测日志中出现 "listening" 作为真正启动成功的信号
+    info "正在启动，稍候..."
+    local i=0
+    while [[ $i -lt 10 ]]; do
+        sleep 1
+        i=$((i + 1))
+        # 优先检查日志里是否出现监听端口（最可靠的成功信号）
+        if grep -q "proxy listening at" "$LOG_FILE" 2>/dev/null; then
+            break
+        fi
+    done
+
+    # 判断：systemd active 或日志中有 listening 均视为成功
+    local is_active is_listening
+    is_active=$(service_status)
+    is_listening=$(grep -c "proxy listening at" "$LOG_FILE" 2>/dev/null || echo "0")
+
+    if [[ "$is_active" == "active" ]] || [[ "$is_listening" -gt 0 ]]; then
         success "mihomo 启动成功！"
-        # 显示端口提示
-        local mixed_port
-        mixed_port=$(grep -E '^mixed-port:' "$CONFIG_FILE" 2>/dev/null | awk '{print $2}' | head -1 || true)
-        [[ -n "$mixed_port" ]] && info "代理地址：127.0.0.1:${mixed_port}"
+        # 显示监听端口
+        local listen_line
+        listen_line=$(grep "proxy listening at" "$LOG_FILE" 2>/dev/null | tail -1 || true)
+        if [[ -n "$listen_line" ]]; then
+            local addr
+            addr=$(echo "$listen_line" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' | head -1)
+            [[ -n "$addr" ]] && info "代理地址：${addr}  ${DIM}(http+socks5)${RESET}"
+        fi
+        info "节点健康检测在后台进行，属正常现象"
     else
-        error "启动失败，查看日志："
+        error "启动失败，最近日志："
         echo ""
         tail -20 "$LOG_FILE" 2>/dev/null || journalctl -u "$SERVICE" -n 20 --no-pager
     fi
